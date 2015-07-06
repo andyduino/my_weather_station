@@ -114,7 +114,7 @@ void GPRSbeeClass::initNdogoSIM800(Stream &stream, int pwrkeyPin, int vbatPin, i
   }
 }
 
-void GPRSbeeClass::initProlog(Stream &stream, int bufferSize)
+void GPRSbeeClass::initProlog(Stream &stream, size_t bufferSize)
 {
   _bufSize = bufferSize;
   _SIM900_buffer = (char *)malloc(_bufSize);
@@ -129,6 +129,8 @@ void GPRSbeeClass::initProlog(Stream &stream, int bufferSize)
   _echoOff = false;
   _onoffMethod = onoff_toggle;
   _skipCGATT = false;
+  _changedSkipCGATT = false;
+  _productId = prodid_unknown;
 }
 
 bool GPRSbeeClass::on()
@@ -341,7 +343,7 @@ int GPRSbeeClass::readLine(uint32_t ts_max)
   uint32_t ts_waitLF = 0;
   bool seenCR = false;
   int c;
-  int bufcnt;
+  size_t bufcnt;
 
   //diagPrintLn(F("readLine"));
   bufcnt = 0;
@@ -765,12 +767,19 @@ bool GPRSbeeClass::getStrValue(const char *cmd, char * str, size_t size, uint32_
 
 bool GPRSbeeClass::waitForSignalQuality()
 {
-  // TODO This timeout is maybe too long.
-  uint32_t ts_max = millis() + 120000;
+  /*
+   * The timeout is just a wild guess. If the mobile connection
+   * is really bad, or even absent, then it is a waste of time
+   * (and battery) to even try.
+   */
+  uint32_t start = millis();
+  uint32_t ts_max = start + 30000;
   int value;
   while (!isTimedOut(ts_max)) {
     if (getIntValue("AT+CSQ", "+CSQ:", &value, millis() + 12000 )) {
       if (value >= _minSignalQuality) {
+        _lastCSQ = value;
+        _CSQtime = (int32_t)(millis() - start) / 1000;
         return true;
       }
     }
@@ -779,6 +788,7 @@ bool GPRSbeeClass::waitForSignalQuality()
       break;
     }
   }
+  _lastCSQ = 0;
   return false;
 }
 
@@ -816,6 +826,44 @@ bool GPRSbeeClass::waitForCREG()
     }
   }
   return false;
+}
+
+/*!
+ * \brief Do a few common things to start a connection
+ *
+ * Do a few things that are common for setting up
+ * a connection for TCP, FTP and HTTP.
+ */
+bool GPRSbeeClass::connectProlog()
+{
+  // Suppress echoing
+  switchEchoOff();
+
+  // Wait for signal quality
+  if (!waitForSignalQuality()) {
+    return false;
+  }
+
+  // Wait for CREG
+  if (!waitForCREG()) {
+    return false;
+  }
+
+  if (!_changedSkipCGATT && _productId == prodid_unknown) {
+    // Try to figure out what kind it is. SIM900? SIM800? etc.
+    setProductId();
+    if (_productId == prodid_SIM800) {
+      _skipCGATT = true;
+    }
+  }
+
+  // Attach to GPRS service
+  // We need a longer timeout than the normal waitForOK
+  if (!_skipCGATT && !sendCommandWaitForOK_P(PSTR("AT+CGATT=1"), 30000)) {
+    return false;
+  }
+
+  return true;
 }
 
 /*
@@ -857,22 +905,7 @@ bool GPRSbeeClass::openTCP(const char *apn, const char *apnuser, const char *apn
     goto ending;
   }
 
-  // Suppress echoing
-  switchEchoOff();
-
-  // Wait for signal quality
-  if (!waitForSignalQuality()) {
-    goto cmd_error;
-  }
-
-  // Wait for CREG
-  if (!waitForCREG()) {
-    goto cmd_error;
-  }
-
-  // Attach to GPRS service
-  // We need a longer timeout than the normal waitForOK
-  if (!_skipCGATT && !sendCommandWaitForOK_P(PSTR("AT+CGATT=1"), 30000)) {
+  if (!connectProlog()) {
     goto cmd_error;
   }
 
@@ -1099,22 +1132,7 @@ bool GPRSbeeClass::openFTP(const char *apn, const char *apnuser, const char *apn
     goto ending;
   }
 
-  // Suppress echoing
-  switchEchoOff();
-
-  // Wait for signal quality
-  if (!waitForSignalQuality()) {
-    goto cmd_error;
-  }
-
-  // Wait for CREG
-  if (!waitForCREG()) {
-    goto cmd_error;
-  }
-
-  // Attach to GPRS service
-  // We need a longer timeout than the normal waitForOK
-  if (!_skipCGATT && !sendCommandWaitForOK_P(PSTR("AT+CGATT=1"), 30000)) {
+  if (!connectProlog()) {
     goto cmd_error;
   }
 
@@ -1582,22 +1600,7 @@ bool GPRSbeeClass::doHTTPprolog(const char *apn, const char *apnuser, const char
 {
   bool retval = false;
 
-  // Suppress echoing
-  switchEchoOff();
-
-  // Wait for signal quality
-  if (!waitForSignalQuality()) {
-    goto ending;
-  }
-
-  // Wait for CREG
-  if (!waitForCREG()) {
-    goto ending;
-  }
-
-  // Attach to GPRS service
-  // We need a longer timeout than the normal waitForOK
-  if (!_skipCGATT && !sendCommandWaitForOK_P(PSTR("AT+CGATT=1"), 30000)) {
+  if (!connectProlog()) {
     goto ending;
   }
 
@@ -2045,6 +2048,35 @@ void GPRSbeeClass::enableCIURC()
 void GPRSbeeClass::disableCIURC()
 {
   if (!sendCommandWaitForOK_P(PSTR("AT+CIURC=0"), 6000)) {
+  }
+}
+
+/*!
+ * \brief Get Product Identification Information
+ *
+ * Send the ATI command and get the result.
+ * SIM900 is expected to return something like:
+ *    SIM900 R11.0
+ * SIM800 is expected to return something like:
+ *    SIM800 R11.08
+ */
+bool GPRSbeeClass::getPII(char *buffer, size_t buflen)
+{
+  switchEchoOff();
+  uint32_t ts_max = millis() + 2000;
+  return getStrValue("ATI", buffer, buflen, ts_max);
+}
+
+void GPRSbeeClass::setProductId()
+{
+  char buffer[64];
+  if (getPII(buffer, sizeof(buffer))) {
+    if (strncmp_P(buffer, PSTR("SIM900"), 6) == 0) {
+      _productId = prodid_SIM900;
+    }
+    else if (strncmp_P(buffer, PSTR("SIM800"), 6) == 0) {
+      _productId = prodid_SIM800;
+    }
   }
 }
 

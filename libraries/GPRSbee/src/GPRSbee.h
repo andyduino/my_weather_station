@@ -107,9 +107,11 @@ public:
   void setDiag(Stream &stream) { _diagStream = &stream; }
   void setDiag(Stream *stream) { _diagStream = stream; }
 
-  void setSkipCGATT(bool x=true)        { _skipCGATT = x; }
+  void setSkipCGATT(bool x=true)        { _skipCGATT = x; _changedSkipCGATT = true; }
 
   void setMinSignalQuality(int q) { _minSignalQuality = q; }
+  uint8_t getLastCSQ() const { return _lastCSQ; }
+  uint8_t getCSQtime() const { return _CSQtime; }
 
   bool doHTTPPOST(const char *apn, const char *url, const char *postdata, size_t pdlen);
   bool doHTTPPOST(const char *apn, const String & url, const char *postdata, size_t pdlen);
@@ -187,7 +189,7 @@ public:
   uint32_t getY2KEpoch() const;
 
 private:
-  void initProlog(Stream &stream, int bufferSize);
+  void initProlog(Stream &stream, size_t bufferSize);
   void onToggle();
   void offToggle();
   void onSwitchMbiliJP2();
@@ -223,9 +225,14 @@ private:
   bool getStrValue(const char *cmd, const char *reply, char * str, size_t size, uint32_t ts_max);
   bool getStrValue_P(const char *cmd, const char *reply, char * str, size_t size, uint32_t ts_max);
   bool getStrValue(const char *cmd, char * str, size_t size, uint32_t ts_max);
+
+  bool connectProlog();
   bool waitForSignalQuality();
   bool waitForCREG();
   bool setBearerParms(const char *apn, const char *user, const char *pwd);
+
+  bool getPII(char *buffer, size_t buflen);
+  void setProductId();
 
   // Small utility to see if we timed out
   bool isTimedOut(uint32_t ts) { return (long)(millis() - ts) >= 0; }
@@ -241,7 +248,7 @@ private:
     onoff_ndogo_sim800,
   };
   char * _SIM900_buffer;
-  int _bufSize;
+  size_t _bufSize;
   Stream *_myStream;
   Stream *_diagStream;
   int8_t _statusPin;
@@ -253,6 +260,15 @@ private:
   bool _echoOff;
   enum onoffKind _onoffMethod;
   bool _skipCGATT;
+  bool _changedSkipCGATT;		// This is set when the user has changed it.
+  uint8_t _lastCSQ;
+  uint8_t _CSQtime;
+  enum productIdKind {
+    prodid_unknown,
+    prodid_SIM900,
+    prodid_SIM800,
+  };
+  enum productIdKind _productId;
 };
 
 extern GPRSbeeClass gprsbee;
